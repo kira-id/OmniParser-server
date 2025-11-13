@@ -413,9 +413,7 @@ def _get_label_token(content: Optional[str], idx: int) -> str:
     if content:
         cleaned = content.strip()
         if cleaned:
-            first_word = cleaned.split()[0]
-            if first_word:
-                return first_word
+            return cleaned
     return f"box{idx}"
 
 
@@ -454,7 +452,6 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     filtered_boxes_elem = sorted(filtered_boxes, key=lambda x: x['content'] is None)
     # get the index of the first 'content': None
     starting_idx = next((i for i, box in enumerate(filtered_boxes_elem) if box['content'] is None), -1)
-    label_phrases = [_get_label_token(box.get('content'), idx) for idx, box in enumerate(filtered_boxes_elem)]
     filtered_boxes = torch.tensor([box['bbox'] for box in filtered_boxes_elem])
     print('len(filtered_boxes):', len(filtered_boxes), starting_idx)
 
@@ -483,7 +480,13 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
 
     filtered_boxes = box_convert(boxes=filtered_boxes, in_fmt="xyxy", out_fmt="cxcywh")
 
-    phrases = label_phrases
+    phrases = []
+    for idx, box in enumerate(filtered_boxes_elem):
+        if box.get('source') == 'box_yolo_content_yolo':
+            content = box.get('content', '')
+            phrases.append(content if content else f"box{idx}")
+        else:
+            phrases.append(_get_label_token(box.get('content'), idx))
     
     # draw boxes
     if draw_bbox_config:
