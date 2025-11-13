@@ -21,21 +21,18 @@ import easyocr
 from paddleocr import PaddleOCR
 reader = easyocr.Reader(['en'])
 paddle_ocr = PaddleOCR(
-    lang='en',  # other lang also available
-    use_angle_cls=False,
-    use_gpu=False,  # using cuda will conflict with pytorch in the same process
-    show_log=False,
-    max_batch_size=1024,
-    use_dilation=True,  # improves accuracy
-    det_db_score_mode='slow',  # improves accuracy
-    rec_batch_num=1024)
+    lang='en',
+    use_doc_orientation_classify=False,
+    use_doc_unwarping=False,
+    use_textline_orientation=False
+)  # keep defaults for compatibility
 import time
 import base64
 
 import os
 import ast
 import torch
-from typing import Tuple, List, Union
+from typing import Tuple, List, Union, Optional
 from torchvision.ops import box_convert
 import re
 from torchvision.transforms import ToPILImage
@@ -50,22 +47,28 @@ def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2
     if model_name == "blip2":
         from transformers import Blip2Processor, Blip2ForConditionalGeneration
         processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
-        if device == 'cpu':
-            model = Blip2ForConditionalGeneration.from_pretrained(
-            model_name_or_path, device_map=None, torch_dtype=torch.float32
-        ) 
-        else:
-            model = Blip2ForConditionalGeneration.from_pretrained(
-            model_name_or_path, device_map=None, torch_dtype=torch.float16
-        ).to(device)
+        dtype = torch.float32 if device == 'cpu' else torch.float16
+        model = Blip2ForConditionalGeneration.from_pretrained(
+            model_name_or_path,
+            device_map=None,
+            dtype=dtype,
+            trust_remote_code=True,
+        )
+        if device != 'cpu':
+            model = model.to(device)
     elif model_name == "florence2":
         from transformers import AutoProcessor, AutoModelForCausalLM 
         processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
-        if device == 'cpu':
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True)
-        else:
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16, trust_remote_code=True).to(device)
-    return {'model': model.to(device), 'processor': processor}
+        dtype = torch.float32 if device == 'cpu' else torch.float16
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name_or_path,
+            dtype=dtype,
+            trust_remote_code=True,
+            attn_implementation="eager",
+        )
+        if device != 'cpu':
+            model = model.to(device)
+    return {'model': model, 'processor': processor}
 
 
 def get_yolo_model(model_path):
@@ -112,7 +115,8 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
         else:
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt").to(device=device)
         if 'florence' in model.config.name_or_path:
-            generated_ids = model.generate(input_ids=inputs["input_ids"],pixel_values=inputs["pixel_values"],max_new_tokens=20,num_beams=1, do_sample=False)
+            # Force past_key_values to be None initially to prevent the AttributeError
+            generated_ids = model.generate(input_ids=inputs["input_ids"],pixel_values=inputs["pixel_values"],max_new_tokens=20,num_beams=1, do_sample=False, use_cache=False)
         else:
             generated_ids = model.generate(**inputs, max_length=100, num_beams=5, no_repeat_ngram_size=2, early_stopping=True, num_return_sequences=1) # temperature=0.01, do_sample=True,
         generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)
@@ -323,7 +327,7 @@ def load_image(image_path: str) -> Tuple[np.array, torch.Tensor]:
     return image, image_transformed
 
 
-def annotate(image_source: np.ndarray, boxes: torch.Tensor, logits: torch.Tensor, phrases: List[str], text_scale: float, 
+def annotate(image_source: np.ndarray, boxes: torch.Tensor, logits: torch.Tensor, phrases: List[str], text_scale: float,
              text_padding=5, text_thickness=2, thickness=3) -> np.ndarray:
     """    
     This function annotates an image with bounding boxes and labels.
@@ -344,13 +348,14 @@ def annotate(image_source: np.ndarray, boxes: torch.Tensor, logits: torch.Tensor
     xywh = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xywh").numpy()
     detections = sv.Detections(xyxy=xyxy)
 
-    labels = [f"{phrase}" for phrase in range(boxes.shape[0])]
+    labels = [phrase if phrase else str(i) for i, phrase in enumerate(phrases)]
 
     box_annotator = BoxAnnotator(text_scale=text_scale, text_padding=text_padding,text_thickness=text_thickness,thickness=thickness) # 0.8 for mobile/web, 0.3 for desktop # 0.4 for mind2web
     annotated_frame = image_source.copy()
     annotated_frame = box_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels, image_size=(w,h))
 
-    label_coordinates = {f"{phrase}": v for phrase, v in zip(phrases, xywh)}
+    label_keys = [f"{phrase}_{i}" for i, phrase in enumerate(phrases)]
+    label_coordinates = {key: v for key, v in zip(label_keys, xywh)}
     return annotated_frame, label_coordinates
 
 
@@ -404,6 +409,16 @@ def int_box_area(box, w, h):
     area = (int_box[2] - int_box[0]) * (int_box[3] - int_box[1])
     return area
 
+def _get_label_token(content: Optional[str], idx: int) -> str:
+    if content:
+        cleaned = content.strip()
+        if cleaned:
+            first_word = cleaned.split()[0]
+            if first_word:
+                return first_word
+    return f"box{idx}"
+
+
 def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_TRESHOLD=0.01, output_coord_in_ratio=False, ocr_bbox=None, text_scale=0.4, text_padding=5, draw_bbox_config=None, caption_model_processor=None, ocr_text=[], use_local_semantics=True, iou_threshold=0.9,prompt=None, scale_img=False, imgsz=None, batch_size=128):
     """Process either an image path or Image object
     
@@ -439,6 +454,7 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     filtered_boxes_elem = sorted(filtered_boxes, key=lambda x: x['content'] is None)
     # get the index of the first 'content': None
     starting_idx = next((i for i, box in enumerate(filtered_boxes_elem) if box['content'] is None), -1)
+    label_phrases = [_get_label_token(box.get('content'), idx) for idx, box in enumerate(filtered_boxes_elem)]
     filtered_boxes = torch.tensor([box['bbox'] for box in filtered_boxes_elem])
     print('len(filtered_boxes):', len(filtered_boxes), starting_idx)
 
@@ -467,7 +483,7 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
 
     filtered_boxes = box_convert(boxes=filtered_boxes, in_fmt="xyxy", out_fmt="cxcywh")
 
-    phrases = [i for i in range(len(filtered_boxes))]
+    phrases = label_phrases
     
     # draw boxes
     if draw_bbox_config:
@@ -514,9 +530,19 @@ def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, out
             text_threshold = 0.5
         else:
             text_threshold = easyocr_args['text_threshold']
-        result = paddle_ocr.ocr(image_np, cls=False)[0]
-        coord = [item[0] for item in result if item[1][1] > text_threshold]
-        text = [item[1][0] for item in result if item[1][1] > text_threshold]
+        result = paddle_ocr.predict(image_np)[0]
+        coord = result['rec_polys']
+        text = result['rec_texts']
+        scores = result['rec_scores']
+        # Filter by text threshold
+        filtered_coord = []
+        filtered_text = []
+        for poly, txt, score in zip(coord, text, scores):
+            if score > text_threshold:
+                filtered_coord.append(poly)
+                filtered_text.append(txt)
+        coord = filtered_coord
+        text = filtered_text
     else:  # EasyOCR
         if easyocr_args is None:
             easyocr_args = {}

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 import gradio as gr
 import numpy as np
@@ -38,7 +38,7 @@ def process(
     iou_threshold,
     use_paddleocr,
     imgsz
-) -> Optional[Image.Image]:
+) -> Tuple[Optional[Image.Image], str]:
 
     box_overlay_ratio = image_input.size[0] / 3200
     draw_bbox_config = {
@@ -93,4 +93,4 @@ with gr.Blocks() as demo:
     )
 
 # demo.launch(debug=False, show_error=True, share=True)
-demo.launch(share=True, server_port=7861, server_name='127.0.0.1')
+demo.launch(share=True, server_port=7863, server_name='0.0.0.0')

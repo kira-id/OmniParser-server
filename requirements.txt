@@ -9,7 +9,7 @@ azure-identity
 numpy==1.26.4
 opencv-python
 opencv-python-headless
-gradio
+gradio==5.49.1
 dill
 accelerate
 timm
