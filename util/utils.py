@@ -51,7 +51,7 @@ def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2
         model = Blip2ForConditionalGeneration.from_pretrained(
             model_name_or_path,
             device_map=None,
-            dtype=dtype,
+            torch_dtype=dtype,
             trust_remote_code=True,
         )
         if device != 'cpu':
@@ -62,7 +62,7 @@ def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2
         dtype = torch.float32 if device == 'cpu' else torch.float16
         model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
-            dtype=dtype,
+            torch_dtype=dtype,
             trust_remote_code=True,
             attn_implementation="eager",
         )
@@ -107,16 +107,14 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
     generated_texts = []
     device = model.device
     for i in range(0, len(croped_pil_image), batch_size):
-        start = time.time()
         batch = croped_pil_image[i:i+batch_size]
-        t1 = time.time()
         if model.device.type == 'cuda':
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt", do_resize=False).to(device=device, dtype=torch.float16)
         else:
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt").to(device=device)
         if 'florence' in model.config.name_or_path:
             # Force past_key_values to be None initially to prevent the AttributeError
-            generated_ids = model.generate(input_ids=inputs["input_ids"],pixel_values=inputs["pixel_values"],max_new_tokens=20,num_beams=1, do_sample=False, use_cache=False)
+            generated_ids = model.generate(input_ids=inputs["input_ids"],pixel_values=inputs["pixel_values"],max_new_tokens=20,num_beams=1, do_sample=False, use_cache=True, past_key_values=None)
         else:
             generated_ids = model.generate(**inputs, max_length=100, num_beams=5, no_repeat_ngram_size=2, early_stopping=True, num_return_sequences=1) # temperature=0.01, do_sample=True,
         generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)
@@ -431,7 +429,7 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     if not imgsz:
         imgsz = (h, w)
     # print('image size:', w, h)
-    xyxy, logits, phrases = predict_yolo(model=model, image=image_source, box_threshold=BOX_TRESHOLD, imgsz=imgsz, scale_img=scale_img, iou_threshold=0.1)
+    xyxy, logits, phrases = predict_yolo(model=model, image=image_source, box_threshold=BOX_TRESHOLD, imgsz=imgsz, scale_img=scale_img, iou_threshold=iou_threshold)
     xyxy = xyxy / torch.Tensor([w, h, w, h]).to(xyxy.device)
     image_source = np.asarray(image_source)
     phrases = [str(i) for i in range(len(phrases))]
