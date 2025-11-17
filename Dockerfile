@@ -62,7 +62,7 @@ RUN set -euo pipefail \
         icon_caption/generation_config.json \
         icon_caption/model.safetensors \
     | while read -r artifact; do \
-        huggingface-cli download microsoft/OmniParser-v2.0 "${artifact}" --local-dir "${WEIGHTS_DIR}"; \
+        hf download microsoft/OmniParser-v2.0 "${artifact}" --local-dir "${WEIGHTS_DIR}"; \
     done \
     && if [ -d "${WEIGHTS_DIR}/icon_caption" ]; then mv "${WEIGHTS_DIR}/icon_caption" "${WEIGHTS_DIR}/icon_caption_florence"; fi
 
