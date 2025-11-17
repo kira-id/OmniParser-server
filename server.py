@@ -8,10 +8,11 @@ import argparse
 import base64
 import binascii
 import io
+import os
 import time
 
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from PIL import Image
 import uvicorn
@@ -37,6 +38,31 @@ def get_models():
 
 
 MAX_SIZE = 1600
+
+OMNIPARSER_API_KEY = os.environ.get("OMNIPARSER_API_KEY", "").strip()
+if not OMNIPARSER_API_KEY:
+    raise RuntimeError("OMNIPARSER_API_KEY environment variable must be provided to start OmniParser")
+
+
+def _validate_api_key(authorization: str | None = Header(None)) -> None:
+    """Ensure requests provide the configured Bearer token."""
+
+    if authorization is None:
+        raise HTTPException(status_code=401, detail="Authorization header is required")
+
+    try:
+        scheme, token = authorization.split(" ", 1)
+    except ValueError:
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization header must be in the format 'Bearer <token>'",
+        )
+
+    if scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Authorization header must use the Bearer scheme")
+
+    if token.strip() != OMNIPARSER_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
 
 
 def _decode_base64_image(image_base64: str) -> Image.Image:
@@ -136,7 +162,7 @@ async def probe():
 
 
 @app.post("/infer", response_model=InferenceResponse, summary="Run OmniParser inference")
-async def infer(request: InferenceRequest) -> InferenceResponse:
+async def infer(request: InferenceRequest, _api_key: None = Depends(_validate_api_key)) -> InferenceResponse:
     image = _decode_base64_image(request.image_base64)
     som_image_base64, parsed_content_list, latency = process(
         image,
