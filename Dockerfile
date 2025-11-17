@@ -13,6 +13,8 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     WEIGHTS_DIR=/app/weights
 
+ENV PPOCR_HOME=${WEIGHTS_DIR}/paddleocr
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
@@ -31,6 +33,21 @@ COPY requirements.txt ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir "huggingface_hub[cli]" \
     && python -m pip install --no-cache-dir -r requirements.txt
+
+# Download PaddleOCR detection/recognition checkpoints once during build so
+# runtime containers do not need outbound access.
+ENV PADDLEOCR_BASE_DIR=${PPOCR_HOME}
+RUN mkdir -p "${PPOCR_HOME}" \
+    && python - <<'PY'
+from paddleocr import PaddleOCR
+
+PaddleOCR(
+    lang='en',
+    use_doc_orientation_classify=False,
+    use_doc_unwarping=False,
+    use_textline_orientation=False,
+)
+PY
 
 COPY . .
 
