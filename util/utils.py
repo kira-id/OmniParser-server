@@ -41,6 +41,20 @@ import torchvision.transforms as T
 from util.box_annotator import BoxAnnotator 
 
 
+def _ensure_ultralytics_pin_memory_setting():
+    """Disable Ultralytics pin_memory on CPU-only hosts to avoid noisy warnings."""
+
+    has_cuda = torch.cuda.is_available()
+    has_mps_backend = getattr(torch.backends, "mps", None)
+    has_mps = has_mps_backend.is_available() if has_mps_backend else False
+    has_xpu_attr = getattr(torch, "xpu", None)
+    has_xpu = has_xpu_attr.is_available() if has_xpu_attr else False
+    has_accelerator = has_cuda or has_mps or has_xpu
+
+    if not has_accelerator and os.environ.get("PIN_MEMORY") is None:
+        os.environ["PIN_MEMORY"] = "False"
+
+
 def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2-opt-2.7b", device=None):
     if not device:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -72,6 +86,7 @@ def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2
 
 
 def get_yolo_model(model_path):
+    _ensure_ultralytics_pin_memory_setting()
     from ultralytics import YOLO
     # Load the model.
     model = YOLO(model_path)
@@ -114,7 +129,16 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt").to(device=device)
         if 'florence' in model.config.name_or_path:
             # Force past_key_values to be None initially to prevent the AttributeError
-            generated_ids = model.generate(input_ids=inputs["input_ids"],pixel_values=inputs["pixel_values"],max_new_tokens=20,num_beams=1, do_sample=False, use_cache=True, past_key_values=None)
+            generated_ids = model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=20,
+                num_beams=1,
+                early_stopping=False,
+                do_sample=False,
+                use_cache=True,
+                past_key_values=None,
+            )
         else:
             generated_ids = model.generate(**inputs, max_length=100, num_beams=5, no_repeat_ngram_size=2, early_stopping=True, num_return_sequences=1) # temperature=0.01, do_sample=True,
         generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)
