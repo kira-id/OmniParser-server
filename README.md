@@ -61,6 +61,24 @@ To run gradio demo, simply run:
 python gradio_demo.py
 ```
 
+## Quantizing the icon detector
+
+The YOLO icon detector can be exported to ONNX and dynamically quantized with the helper script in `scripts/quantize_yolo.py`. The script uses Ultralytics export + ONNX Runtime dynamic quantization so you can reuse the quantized model from other runtimes.
+
+```bash
+python scripts/quantize_yolo.py \
+  --weights weights/icon_detect/model.pt \
+  --output-dir weights/icon_detect_quant \
+  --imgsz 640 \
+  --opset 17 \
+  --dynamic-shapes \
+  --simplify
+```
+
+`weights/icon_detect_quant/` will now contain `icon_detect.onnx` and `icon_detect.quantized.onnx`. If you already have an ONNX file, use `--onnx-file <path>` to skip the export step or `--skip-quant` to only export. Quantized models are generated with ONNX Runtime (install dependencies via `requirements.txt`), so you can load them through ONNX Runtime inference sessions in other tooling.
+
+To run the FastAPI server or Gradio demo with the quantized detector, set `OMNIPARSER_YOLO_QUANTIZED_PATH` to the generated ONNX file (default `weights/icon_detect_quant/model.quantized.onnx`) before launching `python server.py` or `python gradio_demo.py`. The code prefers the quantized model when the file exists and logs a fallback to the PyTorch checkpoint otherwise.
+
 ## Model Weights License
 For the model checkpoints on huggingface model hub, please note that icon_detect model is under AGPL license since it is a license inherited from the original yolo model. And icon_caption_blip2 & icon_caption_florence is under MIT license. Please refer to the LICENSE file in the folder of each model: https://huggingface.co/microsoft/OmniParser.
 

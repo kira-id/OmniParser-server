@@ -51,20 +51,20 @@ PY
 
 COPY . .
 
-# Pre-download model checkpoints into the container image to keep cold-starts fast.
-RUN set -euo pipefail \
-    && mkdir -p "${WEIGHTS_DIR}" \
-    && printf '%s\n' \
-        icon_detect/train_args.yaml \
-        icon_detect/model.pt \
-        icon_detect/model.yaml \
-        icon_caption/config.json \
-        icon_caption/generation_config.json \
-        icon_caption/model.safetensors \
-    | while read -r artifact; do \
-        hf download microsoft/OmniParser-v2.0 "${artifact}" --local-dir "${WEIGHTS_DIR}"; \
-    done \
-    && if [ -d "${WEIGHTS_DIR}/icon_caption" ]; then mv "${WEIGHTS_DIR}/icon_caption" "${WEIGHTS_DIR}/icon_caption_florence"; fi
+# # Pre-download model checkpoints into the container image to keep cold-starts fast.
+# RUN set -euo pipefail \
+#     && mkdir -p "${WEIGHTS_DIR}" \
+#     && printf '%s\n' \
+#         icon_detect/train_args.yaml \
+#         icon_detect/model.pt \
+#         icon_detect/model.yaml \
+#         icon_caption/config.json \
+#         icon_caption/generation_config.json \
+#         icon_caption/model.safetensors \
+#     | while read -r artifact; do \
+#         hf download microsoft/OmniParser-v2.0 "${artifact}" --local-dir "${WEIGHTS_DIR}"; \
+#     done \
+#     && if [ -d "${WEIGHTS_DIR}/icon_caption" ]; then mv "${WEIGHTS_DIR}/icon_caption" "${WEIGHTS_DIR}/icon_caption_florence"; fi
 
 EXPOSE 8000
 

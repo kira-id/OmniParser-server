@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Optional, Tuple
 
 import gradio as gr
@@ -8,12 +9,20 @@ import io
 import time
 
 
-import base64, os
+import base64
+import os
 from util.utils import check_ocr_box, get_yolo_model, get_caption_model_processor, get_som_labeled_img
-import torch
-from PIL import Image
 
-yolo_model = get_yolo_model(model_path='weights/icon_detect/model.pt')
+yolo_model = get_yolo_model(
+    model_path='weights/icon_detect/model.pt',
+    quantized_model_path=Path(
+        os.environ.get(
+            "OMNIPARSER_YOLO_QUANTIZED_PATH",
+            "weights/icon_detect_quant/model.quantized.onnx",
+        )
+    ),
+    prefer_quantized=False,  # Temporarily disable quantized model to test non-quantized fallback
+)
 caption_model_processor = get_caption_model_processor(model_name="florence2", model_name_or_path="weights/icon_caption_florence")
 # caption_model_processor = get_caption_model_processor(model_name="blip2", model_name_or_path="weights/icon_caption_blip2")
 

@@ -1,12 +1,13 @@
 torch
 easyocr
+bitsandbytes>=0.40.0
 torchvision
-supervision==0.18.0
+supervision>=0.26.0
 openai==1.3.5
-transformers==4.49.0
-ultralytics==8.3.70
+transformers>=4.54.0
+ultralytics>=8.3.222
 azure-identity
-numpy==1.26.4
+numpy>=2.3.5
 opencv-python
 opencv-python-headless
 gradio==5.49.1
@@ -30,3 +31,7 @@ screeninfo
 uiautomation
 dashscope
 groq
+onnx>=1.16.0
+onnxruntime>=1.17.0
+onnxruntime-gpu>=1.23.2
+onnxsim>=0.4.0

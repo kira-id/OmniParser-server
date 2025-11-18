@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+
+from pathlib import Path
+
 from typing import Optional, Tuple
 
 import argparse
@@ -24,8 +27,19 @@ from util.utils import (
     get_yolo_model,
 )
 
+QUANTIZED_YOLO_PATH = Path(
+    os.environ.get(
+        "OMNIPARSER_YOLO_QUANTIZED_PATH",
+        "weights/icon_detect_quant/model.quantized.onnx",
+    )
+)
+
 # Initialise models once so the API can serve requests immediately.
-yolo_model = get_yolo_model(model_path="weights/icon_detect/model.pt")
+yolo_model = get_yolo_model(
+    model_path="weights/icon_detect/model.pt",
+    quantized_model_path=QUANTIZED_YOLO_PATH,
+    prefer_quantized=True,
+)
 caption_model_processor = get_caption_model_processor(
     model_name="florence2", model_name_or_path="weights/icon_caption_florence"
 )

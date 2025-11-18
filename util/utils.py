@@ -5,6 +5,7 @@ import base64
 import time
 from PIL import Image, ImageDraw, ImageFont
 import json
+import logging
 import requests
 # utility function
 import os
@@ -32,6 +33,7 @@ import base64
 import os
 import ast
 import torch
+from pathlib import Path
 from typing import Tuple, List, Union, Optional
 from torchvision.ops import box_convert
 import re
@@ -39,6 +41,27 @@ from torchvision.transforms import ToPILImage
 import supervision as sv
 import torchvision.transforms as T
 from util.box_annotator import BoxAnnotator 
+
+logger = logging.getLogger(__name__)
+
+
+def _get_4bit_quantization_config(device: str):
+    if device != "cuda":
+        return None
+    try:
+        from transformers import BitsAndBytesConfig
+    except ImportError:
+        return None
+    try:
+        import bitsandbytes  # noqa: F401
+    except ImportError:
+        return None
+    return BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
 
 
 def _ensure_ultralytics_pin_memory_setting():
@@ -58,38 +81,76 @@ def _ensure_ultralytics_pin_memory_setting():
 def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2-opt-2.7b", device=None):
     if not device:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    quant_config = _get_4bit_quantization_config(device)
+    quant_device_map = {"": "cuda:0"} if quant_config else None
     if model_name == "blip2":
         from transformers import Blip2Processor, Blip2ForConditionalGeneration
         processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
-        dtype = torch.float32 if device == 'cpu' else torch.float16
-        model = Blip2ForConditionalGeneration.from_pretrained(
-            model_name_or_path,
-            device_map=None,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-        )
-        if device != 'cpu':
-            model = model.to(device)
+        if quant_config:
+            model = Blip2ForConditionalGeneration.from_pretrained(
+                model_name_or_path,
+                quantization_config=quant_config,
+                device_map=quant_device_map,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+            )
+        else:
+            dtype = torch.float32 if device == 'cpu' else torch.float16
+            model = Blip2ForConditionalGeneration.from_pretrained(
+                model_name_or_path,
+                device_map=None,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+            )
+            if device != 'cpu':
+                model = model.to(device)
     elif model_name == "florence2":
         from transformers import AutoProcessor, AutoModelForCausalLM 
         processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
-        dtype = torch.float32 if device == 'cpu' else torch.float16
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name_or_path,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-            attn_implementation="eager",
-        )
-        if device != 'cpu':
-            model = model.to(device)
+        if quant_config:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path,
+                quantization_config=quant_config,
+                device_map=quant_device_map,
+                trust_remote_code=True,
+                attn_implementation="eager",
+                low_cpu_mem_usage=True,
+            )
+        else:
+            dtype = torch.float32 if device == 'cpu' else torch.float16
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                attn_implementation="eager",
+                low_cpu_mem_usage=True,
+            )
+            if device != 'cpu':
+                model = model.to(device)
     return {'model': model, 'processor': processor}
 
 
-def get_yolo_model(model_path):
+def get_yolo_model(model_path, quantized_model_path=None, prefer_quantized=False):
     _ensure_ultralytics_pin_memory_setting()
     from ultralytics import YOLO
+
+    model_path = Path(model_path).expanduser()
+    quantized_path = Path(quantized_model_path).expanduser() if quantized_model_path else None
+
+    if prefer_quantized and quantized_path:
+        if quantized_path.exists():
+            logger.info("Loading quantized YOLO ONNX model from %s", quantized_path)
+            return YOLO(str(quantized_path))
+        logger.warning(
+            "Quantized YOLO path %s not found; falling back to %s",
+            quantized_path,
+            model_path,
+        )
+
     # Load the model.
-    model = YOLO(model_path)
+    logger.info("Loading YOLO model from %s", model_path)
+    model = YOLO(str(model_path))
     return model
 
 
@@ -120,10 +181,10 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
             prompt = "The image shows"
     
     generated_texts = []
-    device = model.device
+    device = next(model.parameters()).device
     for i in range(0, len(croped_pil_image), batch_size):
         batch = croped_pil_image[i:i+batch_size]
-        if model.device.type == 'cuda':
+        if device.type == 'cuda':
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt", do_resize=False).to(device=device, dtype=torch.float16)
         else:
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt").to(device=device)
@@ -136,7 +197,7 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
                 num_beams=1,
                 early_stopping=False,
                 do_sample=False,
-                use_cache=True,
+                use_cache=False,
                 past_key_values=None,
             )
         else:
@@ -163,7 +224,7 @@ def get_parsed_content_icon_phi3v(filtered_boxes, ocr_bbox, image_source, captio
         croped_pil_image.append(to_pil(cropped_image))
 
     model, processor = caption_model_processor['model'], caption_model_processor['processor']
-    device = model.device
+    device = next(model.parameters()).device
     messages = [{"role": "user", "content": "<|image_1|>\ndescribe the icon in one sentence"}] 
     prompt = processor.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
@@ -248,9 +309,9 @@ def remove_overlap(boxes, iou_threshold, ocr_bbox=None):
             if ocr_bbox:
                 # only add the box if it does not overlap with any ocr bbox
                 if not any(IoU(box1, box3) > iou_threshold and not is_inside(box1, box3) for k, box3 in enumerate(ocr_bbox)):
-                    filtered_boxes.append(box1)
+                    filtered_boxes.append(box1_elem)
             else:
-                filtered_boxes.append(box1)
+                filtered_boxes.append(box1_elem)
     return torch.tensor(filtered_boxes)
 
 
@@ -331,7 +392,7 @@ def remove_overlap_new(boxes, iou_threshold, ocr_bbox=None):
                     else:
                         filtered_boxes.append({'type': 'icon', 'bbox': box1_elem['bbox'], 'interactivity': True, 'content': None, 'source':'box_yolo_content_yolo'})
             else:
-                filtered_boxes.append(box1)
+                filtered_boxes.append(box1_elem)
     return filtered_boxes # torch.tensor(filtered_boxes)
 
 
@@ -385,7 +446,7 @@ def predict(model, image, caption, box_threshold, text_threshold):
     """ Use huggingface model to replace the original model
     """
     model, processor = model['model'], model['processor']
-    device = model.device
+    device = next(model.parameters()).device
 
     inputs = processor(images=image, text=caption, return_tensors="pt").to(device)
     with torch.no_grad():
@@ -406,24 +467,28 @@ def predict_yolo(model, image, box_threshold, imgsz, scale_img, iou_threshold=0.
     """ Use huggingface model to replace the original model
     """
     # model = model['model']
-    if scale_img:
-        result = model.predict(
-        source=image,
-        conf=box_threshold,
-        imgsz=imgsz,
-        iou=iou_threshold, # default 0.7
-        )
-    else:
-        result = model.predict(
-        source=image,
-        conf=box_threshold,
-        iou=iou_threshold, # default 0.7
-        )
-    boxes = result[0].boxes.xyxy#.tolist() # in pixel space
-    conf = result[0].boxes.conf
-    phrases = [str(i) for i in range(len(boxes))]
+    try:
+        if scale_img:
+            result = model.predict(
+            source=image,
+            conf=box_threshold,
+            imgsz=imgsz,
+            iou=iou_threshold, # default 0.7
+            )
+        else:
+            result = model.predict(
+            source=image,
+            conf=box_threshold,
+            iou=iou_threshold, # default 0.7
+            )
+        boxes = result[0].boxes.xyxy#.tolist() # in pixel space
+        conf = result[0].boxes.conf
+        phrases = [str(i) for i in range(len(boxes))]
 
-    return boxes, conf, phrases
+        return boxes, conf, phrases
+    except Exception as e:
+        logger.error("Failed to run YOLO prediction: %s", str(e))
+        raise
 
 def int_box_area(box, w, h):
     x1, y1, x2, y2 = box
@@ -459,14 +524,16 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     phrases = [str(i) for i in range(len(phrases))]
 
     # annotate the image with labels
+    ocr_bbox = list(ocr_bbox or [])
+    ocr_text = list(ocr_text or [])
+    normalized_ocr_bbox = []
     if ocr_bbox:
-        ocr_bbox = torch.tensor(ocr_bbox) / torch.Tensor([w, h, w, h])
-        ocr_bbox=ocr_bbox.tolist()
+        denom = torch.tensor([w, h, w, h], dtype=torch.float32)
+        normalized_ocr_bbox = (torch.tensor(ocr_bbox, dtype=torch.float32) / denom).tolist()
     else:
         print('no ocr bbox!!!')
-        ocr_bbox = None
 
-    ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt, 'source': 'box_ocr_content_ocr'} for box, txt in zip(ocr_bbox, ocr_text) if int_box_area(box, w, h) > 0] 
+    ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt, 'source': 'box_ocr_content_ocr'} for box, txt in zip(normalized_ocr_bbox, ocr_text) if int_box_area(box, w, h) > 0] 
     xyxy_elem = [{'type': 'icon', 'bbox':box, 'interactivity':True, 'content':None} for box in xyxy.tolist() if int_box_area(box, w, h) > 0]
     filtered_boxes = remove_overlap_new(boxes=xyxy_elem, iou_threshold=iou_threshold, ocr_bbox=ocr_bbox_elem)
     
@@ -474,17 +541,20 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     filtered_boxes_elem = sorted(filtered_boxes, key=lambda x: x['content'] is None)
     # get the index of the first 'content': None
     starting_idx = next((i for i, box in enumerate(filtered_boxes_elem) if box['content'] is None), -1)
-    filtered_boxes = torch.tensor([box['bbox'] for box in filtered_boxes_elem])
-    print('len(filtered_boxes):', len(filtered_boxes), starting_idx)
+    if filtered_boxes_elem:
+        filtered_boxes_tensor = torch.tensor([box['bbox'] for box in filtered_boxes_elem], dtype=torch.float32)
+    else:
+        filtered_boxes_tensor = torch.empty((0, 4), dtype=torch.float32)
+    print('len(filtered_boxes):', len(filtered_boxes_elem), starting_idx)
 
     # get parsed icon local semantics
     time1 = time.time()
     if use_local_semantics:
         caption_model = caption_model_processor['model']
         if 'phi3_v' in caption_model.config.model_type: 
-            parsed_content_icon = get_parsed_content_icon_phi3v(filtered_boxes, ocr_bbox, image_source, caption_model_processor)
+            parsed_content_icon = get_parsed_content_icon_phi3v(filtered_boxes_tensor, normalized_ocr_bbox, image_source, caption_model_processor)
         else:
-            parsed_content_icon = get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=prompt,batch_size=batch_size)
+            parsed_content_icon = get_parsed_content_icon(filtered_boxes_tensor, starting_idx, image_source, caption_model_processor, prompt=prompt,batch_size=batch_size)
         ocr_text = [f"Text Box ID {i}: {txt}" for i, txt in enumerate(ocr_text)]
         icon_start = len(ocr_text)
         parsed_content_icon_ls = []
@@ -500,7 +570,11 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
         parsed_content_merged = ocr_text
     print('time to get parsed content:', time.time()-time1)
 
-    filtered_boxes = box_convert(boxes=filtered_boxes, in_fmt="xyxy", out_fmt="cxcywh")
+    has_filtered_boxes = filtered_boxes_tensor.numel() != 0
+    if has_filtered_boxes:
+        filtered_boxes = box_convert(boxes=filtered_boxes_tensor, in_fmt="xyxy", out_fmt="cxcywh")
+    else:
+        filtered_boxes = filtered_boxes_tensor
 
     phrases = []
     for idx, box in enumerate(filtered_boxes_elem):
@@ -511,10 +585,14 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
             phrases.append(_get_label_token(box.get('content'), idx))
     
     # draw boxes
-    if draw_bbox_config:
-        annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=filtered_boxes, logits=logits, phrases=phrases, **draw_bbox_config)
+    if has_filtered_boxes:
+        if draw_bbox_config:
+            annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=filtered_boxes, logits=logits, phrases=phrases, **draw_bbox_config)
+        else:
+            annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=filtered_boxes, logits=logits, phrases=phrases, text_scale=text_scale, text_padding=text_padding)
     else:
-        annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=filtered_boxes, logits=logits, phrases=phrases, text_scale=text_scale, text_padding=text_padding)
+        annotated_frame = image_source.copy()
+        label_coordinates = {}
     
     pil_img = Image.fromarray(annotated_frame)
     buffered = io.BytesIO()
